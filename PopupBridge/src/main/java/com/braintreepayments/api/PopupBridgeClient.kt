@@ -141,12 +141,21 @@ class PopupBridgeClient @SuppressLint("SetJavaScriptEnabled") internal construct
     }
 
     fun handleReturnToApp(intent: Intent) {
-        // Only treat PopupBridge deep links with app-switch-style path/fragment data as
-        // native app returns. Secure-browser fallback can also return to popupbridgev1.
+        // Native app-switch returns use the same popupbridgev1 host/path/fragment shapes as
+        // browser/custom-tab returns. Only short-circuit to [handleAppSwitchReturn] when we
+        // actually launched the PayPal app from this session. Otherwise cancel-shaped URLs
+        // (e.g. #onCancel) would be dropped when App Switch is off, and the WebView would
+        // never get onCancel / onComplete.
         val returnUri = intent.data
         if (returnUri != null && returnUri.isAppSwitchReturnUri()) {
-            handleAppSwitchReturn(returnUri)
-            return
+            if (expectingAppSwitchReturn) {
+                handleAppSwitchReturn(returnUri)
+                return
+            }
+            if (!returnUri.isCancelUri()) {
+                return
+            }
+            // Fall through: cancel return from a browser flow that matched app-switch URI heuristics.
         }
 
         if (isHandlingReturnToApp) {
@@ -247,10 +256,26 @@ class PopupBridgeClient @SuppressLint("SetJavaScriptEnabled") internal construct
     private fun Uri.isCancelUri(): Boolean {
         val normalizedPath = path.orEmpty().lowercase()
         val normalizedFragment = fragment.orEmpty().lowercase()
-        return normalizedPath.contains("oncancel") ||
+        if (normalizedPath.contains("oncancel") ||
             normalizedPath.contains("/cancel") ||
             normalizedFragment.contains("oncancel") ||
             normalizedFragment.contains("/cancel")
+        ) {
+            return true
+        }
+        // Hash-only "cancel" (no "on" prefix) seen on some PPCP / vault flows.
+        if (normalizedFragment == "cancel" || normalizedFragment.startsWith("cancel&") ||
+            normalizedFragment.startsWith("cancel#")
+        ) {
+            return true
+        }
+        // VA / vault and some ECS returns use query flags instead of #onCancel (especially app switch).
+        return try {
+            getQueryParameter("user_action")?.equals("cancel", ignoreCase = true) == true ||
+                getQueryParameter("opType")?.equals("cancel", ignoreCase = true) == true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     private fun Uri.hasAppSwitchPath(): Boolean {

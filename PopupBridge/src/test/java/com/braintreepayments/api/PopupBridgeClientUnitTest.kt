@@ -306,6 +306,34 @@ class PopupBridgeClientUnitTest {
         }
 
     @Test
+    fun `when handleReturnToApp is called and browser switch succeeds with user_action cancel query, canceled javascript is run`() =
+        runTest {
+            val returnUrl = Uri.Builder()
+                .scheme("my-custom-url-scheme")
+                .authority("popupbridgev1")
+                .appendQueryParameter("user_action", "cancel")
+                .build()
+
+            val browserSwitchFinalResult = mockk<BrowserSwitchFinalResult.Success>()
+            every { browserSwitchClient.completeRequest(intent, pendingRequest) } returns browserSwitchFinalResult
+            every { browserSwitchFinalResult.returnUrl } returns returnUrl
+
+            initializeClient()
+
+            subject.handleReturnToApp(intent)
+            testScheduler.advanceUntilIdle()
+            runnableSlot.captured.run()
+
+            verify {
+                webViewMock.evaluateJavascript(withArg { javascriptString ->
+                    assertEquals(CANCELED_JAVASCRIPT, javascriptString)
+                }, null)
+            }
+            verify(exactly = 0) { analyticsClient.sendEvent(POPUP_BRIDGE_SUCCEEDED) }
+            verify { analyticsClient.sendEvent(POPUP_BRIDGE_CANCELED) }
+        }
+
+    @Test
     fun `when handleReturnToApp is called and browser switch succeeds, POPUP_BRIDGE_SUCCEEDED event is sent`() =
         runTest {
             val returnUrl = Uri.Builder()
@@ -573,6 +601,31 @@ class PopupBridgeClientUnitTest {
         }
 
     @Test
+    fun `when handleReturnToApp is called with app switch user_action cancel query and expecting return, canceled JS runs`() =
+        runTest {
+            val appSwitchReturnUri = Uri.Builder()
+                .scheme(returnUrlScheme)
+                .authority(POPUP_BRIDGE_URL_HOST)
+                .appendQueryParameter("user_action", "cancel")
+                .build()
+            every { intent.data } returns appSwitchReturnUri
+
+            initializeClient()
+            setPrivateExpectingAppSwitchReturn(subject, true)
+
+            subject.handleReturnToApp(intent)
+            testScheduler.advanceUntilIdle()
+            runnableSlot.captured.run()
+
+            verify { analyticsClient.sendEvent(POPUP_BRIDGE_APP_SWITCH_RETURNED) }
+            verify {
+                webViewMock.evaluateJavascript(withArg { script ->
+                    assertTrue(script.contains("notifyCanceled()"))
+                }, null)
+            }
+        }
+
+    @Test
     fun `when handleReturnToApp is called with app switch intent and path is cancel segment runs canceled JS`() =
         runTest {
             val appSwitchReturnUri = Uri.Builder()
@@ -777,13 +830,42 @@ class PopupBridgeClientUnitTest {
             every { intent.data } returns appSwitchReturnUri
 
             initializeClient()
-            // Do not set expectingAppSwitchReturn; handleAppSwitchReturn returns early
+            // Do not set expectingAppSwitchReturn; non-cancel-shaped links are ignored
 
             subject.handleReturnToApp(intent)
             testScheduler.advanceUntilIdle()
 
             verify(exactly = 0) { analyticsClient.sendEvent(POPUP_BRIDGE_APP_SWITCH_RETURNED) }
             verify(exactly = 0) { webViewMock.evaluateJavascript(any(), any()) }
+        }
+
+    @Test
+    fun `when handleReturnToApp is called with cancel-shaped uri and not expecting app switch, browser switch runs canceled JS`() =
+        runTest {
+            val cancelReturnUri = Uri.Builder()
+                .scheme(returnUrlScheme)
+                .authority(POPUP_BRIDGE_URL_HOST)
+                .fragment("onCancel")
+                .build()
+            every { intent.data } returns cancelReturnUri
+            val browserSwitchFinalResult = mockk<BrowserSwitchFinalResult.Success>()
+            every { browserSwitchClient.completeRequest(intent, pendingRequest) } returns browserSwitchFinalResult
+            every { browserSwitchFinalResult.returnUrl } returns cancelReturnUri
+
+            initializeClient()
+
+            subject.handleReturnToApp(intent)
+            testScheduler.advanceUntilIdle()
+            runnableSlot.captured.run()
+
+            verify(exactly = 0) { analyticsClient.sendEvent(POPUP_BRIDGE_APP_SWITCH_RETURNED) }
+            verify { browserSwitchClient.completeRequest(intent, pendingRequest) }
+            verify { analyticsClient.sendEvent(POPUP_BRIDGE_CANCELED) }
+            verify {
+                webViewMock.evaluateJavascript(withArg { script ->
+                    assertTrue(script.contains("notifyCanceled()"))
+                }, null)
+            }
         }
 
     private fun setPrivateExpectingAppSwitchReturn(client: PopupBridgeClient, value: Boolean) {
